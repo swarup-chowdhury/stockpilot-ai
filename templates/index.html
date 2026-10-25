@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="StockPilot AI smart inventory and demand intelligence">
+  <link rel="icon" href="/static/favicon.svg">
+  <title>StockPilot AI</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <div id="login-screen" class="login-screen">
+    <div class="login-orbit orbit-one"></div><div class="login-orbit orbit-two"></div>
+    <section class="login-card">
+      <div class="brand-lockup large"><span class="brand-mark"><i></i><i></i></span><span>STOCKPILOT <b>AI</b></span></div>
+      <p class="eyebrow">SMART INVENTORY CONTROL</p>
+      <h1>Clarity before the next purchase.</h1>
+      <p class="login-copy">A calm, explainable workspace for stock health, demand signals, and action-ready decisions.</p>
+      <form id="login-form">
+        <label>Email<input id="login-email" type="email" value="owner@stockpilot.ai" required></label>
+        <label>Password<input id="login-password" type="password" value="demo123" required></label>
+        <button class="primary-btn full" type="submit">Enter workspace <span>↗</span></button>
+        <div id="login-error" class="form-error"></div>
+      </form>
+      <div class="demo-hint"><span class="signal-dot"></span><div><strong>Demo workspace</strong><small>Use owner@stockpilot.ai / demo123</small></div></div>
+    </section>
+    <div class="login-foot">Built for owners who want every recommendation to show its math.</div>
+  </div>
+
+  <div id="app-shell" class="app-shell hidden">
+    <aside class="sidebar" id="sidebar">
+      <div class="sidebar-top"><div class="brand-lockup"><span class="brand-mark"><i></i><i></i></span><span>STOCKPILOT <b>AI</b></span></div><button class="icon-btn mobile-close" id="close-sidebar">×</button></div>
+      <div class="workspace-switch"><span class="workspace-icon">NP</span><div><strong>Northstar Pantry</strong><small>Demo workspace</small></div><span class="chevron">⌄</span></div>
+      <nav class="main-nav">
+        <p class="nav-label">COMMAND CENTER</p>
+        <button class="nav-item active" data-view="dashboard"><span class="nav-icon">⌂</span>Overview</button>
+        <button class="nav-item" data-view="inventory"><span class="nav-icon">▦</span>Inventory</button>
+        <button class="nav-item" data-view="sales"><span class="nav-icon">↗</span>Sales & billing</button>
+        <button class="nav-item" data-view="purchases"><span class="nav-icon">◈</span>Purchasing</button>
+        <button class="nav-item" data-view="restocking"><span class="nav-icon">✦</span>Restocking AI <em>6</em></button>
+        <p class="nav-label section-gap">INSIGHTS</p>
+        <button class="nav-item" data-view="analytics"><span class="nav-icon">⌁</span>Analytics</button>
+        <button class="nav-item" data-view="expiry"><span class="nav-icon">◷</span>Expiry & waste</button>
+        <button class="nav-item" data-view="algorithms"><span class="nav-icon">⌘</span>Algorithm lab</button>
+        <button class="nav-item" data-view="reports"><span class="nav-icon">▤</span>Reports</button>
+        <p class="nav-label section-gap">WORKSPACE</p>
+        <button class="nav-item" data-view="assistant"><span class="nav-icon">✧</span>Business assistant</button>
+        <button class="nav-item" data-view="settings"><span class="nav-icon">⚙</span>Settings</button>
+      </nav>
+      <div class="sidebar-bottom"><div class="health-line"><span class="status-dot"></span><span>All systems operational</span></div><div class="user-strip"><span class="avatar" id="user-avatar">AM</span><div><strong id="user-name">Aarav Mehta</strong><small id="user-role">Admin / Owner</small></div><button class="icon-btn" id="logout-btn" title="Log out">↪</button></div></div>
+    </aside>
+
+    <main class="workspace">
+      <header class="topbar"><button class="icon-btn menu-toggle" id="open-sidebar">☰</button><div class="crumb"><span>Northstar Pantry</span><b>/</b><strong id="crumb-title">Overview</strong></div><div class="top-actions"><label class="global-search"><span>⌕</span><input id="global-search" placeholder="Search products, SKUs, orders..." /></label><button class="icon-btn notification-btn" id="notification-btn">♢<span id="notification-count" class="notification-count">0</span></button><button class="avatar top-avatar" id="top-avatar">AM</button></div></header>
+      <div class="demo-ribbon"><span class="signal-dot"></span> DEMO MODE <span class="ribbon-separator"></span> Fictional data for evaluation — every metric is database-backed</div>
+      <div class="content" id="content"></div>
+    </main>
+  </div>
+  <div id="toast-region" class="toast-region"></div>
+  <div id="modal-region"></div>
+  <script src="/static/app.js"></script>
+</body>
+</html>
