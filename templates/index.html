@@ -15,11 +15,20 @@
       <p class="eyebrow">SMART INVENTORY CONTROL</p>
       <h1>Clarity before the next purchase.</h1>
       <p class="login-copy">A calm, explainable workspace for stock health, demand signals, and action-ready decisions.</p>
+      <div class="auth-tabs"><button type="button" class="auth-tab active" id="show-login">Sign in</button><button type="button" class="auth-tab" id="show-register">Create new admin</button></div>
       <form id="login-form">
         <label>Email<input id="login-email" type="email" value="owner@stockpilot.ai" required></label>
         <label>Password<input id="login-password" type="password" value="demo123" required></label>
         <button class="primary-btn full" type="submit">Enter workspace <span>↗</span></button>
         <div id="login-error" class="form-error"></div>
+      </form>
+      <form id="register-form" class="hidden">
+        <label>Admin name<input id="register-name" type="text" placeholder="e.g. Priya Sharma" required></label>
+        <label>Email<input id="register-email" type="email" placeholder="admin@yourbusiness.com" required></label>
+        <label>Password<input id="register-password" type="password" minlength="6" placeholder="At least 6 characters" required></label>
+        <label>Confirm password<input id="register-confirm" type="password" minlength="6" required></label>
+        <button class="primary-btn full" type="submit">Create admin account <span>↗</span></button>
+        <div id="register-error" class="form-error"></div>
       </form>
       <div class="demo-hint"><span class="signal-dot"></span><div><strong>Demo workspace</strong><small>Use owner@stockpilot.ai / demo123</small></div></div>
     </section>
