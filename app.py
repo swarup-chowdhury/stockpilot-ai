@@ -5,7 +5,7 @@ import secrets
 from functools import wraps
 from flask import Flask, g, jsonify, render_template, request, session, make_response, send_from_directory
 from config import Config
-from db import init_db, rows, row_dict, password_hash
+from db import init_db, rows, row_dict
 from services import dashboard, product_rows, supplier_records, create_product, process_sale, receive_purchase, record_waste, report, assistant_answer
 
 app = Flask(__name__, template_folder="templates", static_folder="static")
@@ -74,34 +74,13 @@ def login():
     payload = request.get_json(silent=True) or {}
     email, password = payload.get("email", "").strip().lower(), payload.get("password", "")
     user = db().execute("SELECT id,name,email,role,password_hash FROM users WHERE lower(email)=? AND active=1", (email,)).fetchone()
+    from db import password_hash
     if not user or password_hash(password) != user["password_hash"]:
         return jsonify({"error": "Incorrect email or password"}), 401
     session.clear(); session.permanent = True
     session["user"] = {"id": user["id"], "name": user["name"], "email": user["email"], "role": user["role"]}
     session["csrf_token"] = secrets.token_urlsafe(24)
     return jsonify({"user": session["user"], "csrf_token": session["csrf_token"]})
-
-@app.post("/api/register-admin")
-def register_admin():
-    payload = request.get_json(silent=True) or {}
-    name = " ".join(str(payload.get("name", "")).strip().split())
-    email = str(payload.get("email", "")).strip().lower()
-    password = str(payload.get("password", ""))
-    confirm = str(payload.get("confirm_password", ""))
-    if len(name) < 2: return jsonify({"error": "Enter the admin name you want shown on the dashboard"}), 400
-    if "@" not in email or "." not in email: return jsonify({"error": "Enter a valid email address"}), 400
-    if len(password) < 6: return jsonify({"error": "Password must contain at least 6 characters"}), 400
-    if password != confirm: return jsonify({"error": "Passwords do not match"}), 400
-    try:
-        cur = db().execute("INSERT INTO users(name,email,password_hash,role) VALUES(?,?,?,'admin')", (name, email, password_hash(password)))
-        db().commit()
-    except Exception:
-        db().rollback()
-        return jsonify({"error": "An account with this email already exists"}), 409
-    session.clear(); session.permanent = True
-    session["user"] = {"id": cur.lastrowid, "name": name, "email": email, "role": "admin"}
-    session["csrf_token"] = secrets.token_urlsafe(24)
-    return jsonify({"user": session["user"], "csrf_token": session["csrf_token"]}), 201
 
 @app.post("/api/logout")
 @api_login_required
