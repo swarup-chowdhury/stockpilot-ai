@@ -35,3 +35,11 @@
 - [ ] Notifications are condition-based and can be marked read.
 - [ ] `.env.example`, dependency manifest, docs, tests, logging, safe errors, and input validation are included.
 - [ ] Python compilation, unit tests, route manifest validation, and a read-only requirements review pass before checkpoint.
+
+## Multi-user workspace isolation
+
+- Add a visible “Create new admin” option on the login page with name, email, password, and workspace name fields; validate unique email, required values, and secure password length.
+- Store each account with its own login credentials and workspace ID in the persistent database; protect all authenticated reads and writes with the logged-in workspace scope.
+- Preserve the built-in demo account and its fictional demo records in the demo workspace only; new accounts must start with no products, sales, suppliers, purchase orders, notifications, or seeded operational records.
+- Show the new account’s own name and workspace in the application shell; show a clear first-use onboarding/training state when its workspace is empty.
+- Verify demo-account data is not visible to a newly registered account and that newly created records remain scoped to that account after logout/login and application restart.

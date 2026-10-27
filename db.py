@@ -10,6 +10,7 @@ from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
 SCHEMA = """
+CREATE TABLE IF NOT EXISTS workspaces (id INTEGER PRIMARY KEY, name TEXT NOT NULL, slug TEXT UNIQUE NOT NULL, is_demo INTEGER DEFAULT 0, created_at TEXT DEFAULT CURRENT_TIMESTAMP);
 CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, name TEXT NOT NULL, email TEXT UNIQUE NOT NULL, password_hash TEXT NOT NULL, role TEXT NOT NULL CHECK(role IN ('admin','manager','staff')), active INTEGER DEFAULT 1);
 CREATE TABLE IF NOT EXISTS categories (id INTEGER PRIMARY KEY, name TEXT UNIQUE NOT NULL);
 CREATE TABLE IF NOT EXISTS suppliers (id INTEGER PRIMARY KEY, name TEXT NOT NULL, contact TEXT, email TEXT, lead_time_days INTEGER DEFAULT 4, reliability REAL DEFAULT 0.8, status TEXT DEFAULT 'active');
@@ -30,6 +31,7 @@ CREATE INDEX IF NOT EXISTS idx_sales_date ON sales(sale_date);
 """
 
 MYSQL_SCHEMA = [
+    """CREATE TABLE IF NOT EXISTS workspaces (id BIGINT PRIMARY KEY AUTO_INCREMENT, name VARCHAR(180) NOT NULL, slug VARCHAR(120) UNIQUE NOT NULL, is_demo TINYINT DEFAULT 0, created_at VARCHAR(32) DEFAULT NULL)""",
     """CREATE TABLE IF NOT EXISTS users (id BIGINT PRIMARY KEY AUTO_INCREMENT, name VARCHAR(160) NOT NULL, email VARCHAR(255) UNIQUE NOT NULL, password_hash VARCHAR(255) NOT NULL, role VARCHAR(20) NOT NULL, active TINYINT DEFAULT 1)""",
     """CREATE TABLE IF NOT EXISTS categories (id BIGINT PRIMARY KEY AUTO_INCREMENT, name VARCHAR(120) UNIQUE NOT NULL)""",
     """CREATE TABLE IF NOT EXISTS suppliers (id BIGINT PRIMARY KEY AUTO_INCREMENT, name VARCHAR(180) NOT NULL, contact VARCHAR(80), email VARCHAR(255), lead_time_days INT DEFAULT 4, reliability DOUBLE DEFAULT 0.8, status VARCHAR(20) DEFAULT 'active')""",
@@ -162,6 +164,45 @@ def connect(path):
     return conn
 
 
+TENANT_TABLES = ("users", "categories", "suppliers", "products", "stock_batches", "sales", "sale_items", "stock_movements", "purchase_orders", "purchase_order_items", "notifications", "audit_logs", "inventory_policies")
+_TENANCY_READY = False
+
+
+def _has_column(conn, table, column, is_mysql):
+    if is_mysql:
+        return bool(conn.execute("SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=? AND COLUMN_NAME=?", (table, column)).fetchone())
+    return bool(conn.execute(f"PRAGMA table_info({table})").fetchall() and any(r[1] == column for r in conn.execute(f"PRAGMA table_info({table})").fetchall()))
+
+
+def ensure_tenancy(conn, is_mysql):
+    global _TENANCY_READY
+    if _TENANCY_READY:
+        return
+    if is_mysql:
+        conn.execute("CREATE TABLE IF NOT EXISTS workspaces (id BIGINT PRIMARY KEY AUTO_INCREMENT, name VARCHAR(180) NOT NULL, slug VARCHAR(120) UNIQUE NOT NULL, is_demo TINYINT DEFAULT 0, created_at VARCHAR(32) DEFAULT NULL)")
+        column_type = "BIGINT"
+    else:
+        conn.execute("CREATE TABLE IF NOT EXISTS workspaces (id INTEGER PRIMARY KEY, name TEXT NOT NULL, slug TEXT UNIQUE NOT NULL, is_demo INTEGER DEFAULT 0, created_at TEXT DEFAULT CURRENT_TIMESTAMP)")
+        column_type = "INTEGER"
+    for table in TENANT_TABLES:
+        if not _has_column(conn, table, "workspace_id", is_mysql):
+            try:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN workspace_id {column_type}")
+            except Exception as exc:
+                if "duplicate" not in str(exc).lower() and "exists" not in str(exc).lower():
+                    raise
+    demo = conn.execute("SELECT id FROM workspaces WHERE slug=?", ("demo",)).fetchone()
+    if not demo:
+        cur = conn.execute("INSERT INTO workspaces(name,slug,is_demo,created_at) VALUES(?,?,?,?)", ("Northstar Pantry", "demo", 1, date.today().isoformat()))
+        demo_id = cur.lastrowid
+    else:
+        demo_id = demo["id"]
+    for table in TENANT_TABLES:
+        conn.execute(f"UPDATE {table} SET workspace_id=? WHERE workspace_id IS NULL", (demo_id,))
+    conn.commit()
+    _TENANCY_READY = True
+
+
 def init_db(path):
     dsn = os.getenv("DATABASE_URL", "").strip()
     is_mysql = dsn.startswith(("mysql://", "mysql+mysqlconnector://", "mysql+pymysql://"))
@@ -180,6 +221,7 @@ def init_db(path):
         conn.commit()
     else:
         conn.executescript(SCHEMA)
+    ensure_tenancy(conn, is_mysql)
     count = conn.execute("SELECT COUNT(*) FROM products").fetchone()[0]
     if count == 0:
         seed(conn)
