@@ -1,10 +1,13 @@
 import hashlib
 import json
+import os
 import random
 import sqlite3
+import ssl
 from datetime import date, timedelta
 from decimal import Decimal
 from pathlib import Path
+from urllib.parse import unquote, urlsplit
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, name TEXT NOT NULL, email TEXT UNIQUE NOT NULL, password_hash TEXT NOT NULL, role TEXT NOT NULL CHECK(role IN ('admin','manager','staff')), active INTEGER DEFAULT 1);
@@ -26,6 +29,110 @@ CREATE INDEX IF NOT EXISTS idx_batches_expiry ON stock_batches(expiry_date);
 CREATE INDEX IF NOT EXISTS idx_sales_date ON sales(sale_date);
 """
 
+MYSQL_SCHEMA = [
+    """CREATE TABLE IF NOT EXISTS users (id BIGINT PRIMARY KEY AUTO_INCREMENT, name VARCHAR(160) NOT NULL, email VARCHAR(255) UNIQUE NOT NULL, password_hash VARCHAR(255) NOT NULL, role VARCHAR(20) NOT NULL, active TINYINT DEFAULT 1)""",
+    """CREATE TABLE IF NOT EXISTS categories (id BIGINT PRIMARY KEY AUTO_INCREMENT, name VARCHAR(120) UNIQUE NOT NULL)""",
+    """CREATE TABLE IF NOT EXISTS suppliers (id BIGINT PRIMARY KEY AUTO_INCREMENT, name VARCHAR(180) NOT NULL, contact VARCHAR(80), email VARCHAR(255), lead_time_days INT DEFAULT 4, reliability DOUBLE DEFAULT 0.8, status VARCHAR(20) DEFAULT 'active')""",
+    """CREATE TABLE IF NOT EXISTS products (id BIGINT PRIMARY KEY AUTO_INCREMENT, sku VARCHAR(60) UNIQUE NOT NULL, barcode VARCHAR(80) UNIQUE NOT NULL, name VARCHAR(220) NOT NULL, description TEXT, category_id BIGINT NOT NULL, supplier_id BIGINT, purchase_cost DECIMAL(12,2) NOT NULL, selling_price DECIMAL(12,2) NOT NULL, current_qty INT NOT NULL DEFAULT 0, minimum_stock INT NOT NULL DEFAULT 5, reorder_level INT NOT NULL DEFAULT 10, unit VARCHAR(30) DEFAULT 'unit', expiry_required TINYINT DEFAULT 0, active TINYINT DEFAULT 1, created_at VARCHAR(32) DEFAULT NULL, FOREIGN KEY(category_id) REFERENCES categories(id), FOREIGN KEY(supplier_id) REFERENCES suppliers(id))""",
+    """CREATE TABLE IF NOT EXISTS stock_batches (id BIGINT PRIMARY KEY AUTO_INCREMENT, product_id BIGINT NOT NULL, batch_code VARCHAR(100) UNIQUE NOT NULL, quantity INT NOT NULL, expiry_date VARCHAR(32), received_date VARCHAR(32) NOT NULL, FOREIGN KEY(product_id) REFERENCES products(id))""",
+    """CREATE TABLE IF NOT EXISTS sales (id BIGINT PRIMARY KEY AUTO_INCREMENT, invoice_no VARCHAR(80) UNIQUE NOT NULL, sale_date VARCHAR(32) NOT NULL, subtotal DECIMAL(12,2) NOT NULL, discount DECIMAL(12,2) DEFAULT 0, tax DECIMAL(12,2) DEFAULT 0, total DECIMAL(12,2) NOT NULL, payment_method VARCHAR(30) DEFAULT 'card', status VARCHAR(20) DEFAULT 'completed', user_id BIGINT, FOREIGN KEY(user_id) REFERENCES users(id))""",
+    """CREATE TABLE IF NOT EXISTS sale_items (id BIGINT PRIMARY KEY AUTO_INCREMENT, sale_id BIGINT NOT NULL, product_id BIGINT NOT NULL, quantity INT NOT NULL, unit_price DECIMAL(12,2) NOT NULL, cost_price DECIMAL(12,2) NOT NULL, FOREIGN KEY(sale_id) REFERENCES sales(id), FOREIGN KEY(product_id) REFERENCES products(id))""",
+    """CREATE TABLE IF NOT EXISTS stock_movements (id BIGINT PRIMARY KEY AUTO_INCREMENT, product_id BIGINT NOT NULL, batch_id BIGINT NULL, movement_type VARCHAR(30) NOT NULL, quantity INT NOT NULL, reason VARCHAR(300), reference VARCHAR(100), created_at VARCHAR(32) NOT NULL, user_id BIGINT, FOREIGN KEY(product_id) REFERENCES products(id))""",
+    """CREATE TABLE IF NOT EXISTS purchase_orders (id BIGINT PRIMARY KEY AUTO_INCREMENT, po_number VARCHAR(80) UNIQUE NOT NULL, supplier_id BIGINT NOT NULL, order_date VARCHAR(32) NOT NULL, expected_date VARCHAR(32), status VARCHAR(20) DEFAULT 'pending', total DECIMAL(12,2) DEFAULT 0, FOREIGN KEY(supplier_id) REFERENCES suppliers(id))""",
+    """CREATE TABLE IF NOT EXISTS purchase_order_items (id BIGINT PRIMARY KEY AUTO_INCREMENT, po_id BIGINT NOT NULL, product_id BIGINT NOT NULL, ordered_qty INT NOT NULL, received_qty INT DEFAULT 0, unit_cost DECIMAL(12,2) NOT NULL, FOREIGN KEY(po_id) REFERENCES purchase_orders(id), FOREIGN KEY(product_id) REFERENCES products(id))""",
+    """CREATE TABLE IF NOT EXISTS notifications (id BIGINT PRIMARY KEY AUTO_INCREMENT, kind VARCHAR(30) NOT NULL, title VARCHAR(220) NOT NULL, message VARCHAR(600) NOT NULL, severity VARCHAR(20) DEFAULT 'info', entity_type VARCHAR(40), entity_id BIGINT, is_read TINYINT DEFAULT 0, created_at VARCHAR(32) NOT NULL)""",
+    """CREATE TABLE IF NOT EXISTS audit_logs (id BIGINT PRIMARY KEY AUTO_INCREMENT, action VARCHAR(80) NOT NULL, entity VARCHAR(80), entity_id BIGINT, detail VARCHAR(1000), created_at VARCHAR(32) NOT NULL, user_id BIGINT, FOREIGN KEY(user_id) REFERENCES users(id))""",
+    """CREATE TABLE IF NOT EXISTS inventory_policies (key_name VARCHAR(80) PRIMARY KEY, value VARCHAR(120) NOT NULL)""",
+    """CREATE INDEX idx_products_category ON products(category_id)""",
+    """CREATE INDEX idx_movements_product ON stock_movements(product_id, created_at)""",
+    """CREATE INDEX idx_batches_expiry ON stock_batches(expiry_date)""",
+    """CREATE INDEX idx_sales_date ON sales(sale_date)""",
+]
+
+
+class MySQLRow(dict):
+    def __getitem__(self, key):
+        if isinstance(key, int):
+            return list(self.values())[key]
+        return super().__getitem__(key)
+
+
+class MySQLResult:
+    def __init__(self, cursor):
+        self.cursor = cursor
+
+    @staticmethod
+    def _normalize(row):
+        if not row:
+            return row
+        result = MySQLRow(row)
+        for key, value in list(result.items()):
+            if isinstance(value, Decimal):
+                result[key] = float(value)
+                continue
+            if hasattr(value, "isoformat"):
+                result[key] = value.isoformat()
+        return result
+
+    def fetchone(self):
+        return self._normalize(self.cursor.fetchone())
+
+    def fetchall(self):
+        return [self._normalize(row) for row in self.cursor.fetchall()]
+
+    def __iter__(self):
+        return iter(self.fetchall())
+
+    @property
+    def lastrowid(self):
+        return self.cursor.lastrowid
+
+
+class MySQLConnection:
+    def __init__(self, dsn):
+        import pymysql
+
+        parsed = urlsplit(dsn)
+        ssl_context = ssl.create_default_context()
+        self.raw = pymysql.connect(
+            host=parsed.hostname,
+            port=parsed.port or 3306,
+            user=unquote(parsed.username or ""),
+            password=unquote(parsed.password or ""),
+            database=parsed.path.lstrip("/"),
+            charset="utf8mb4",
+            autocommit=False,
+            cursorclass=pymysql.cursors.DictCursor,
+            ssl=ssl_context,
+        )
+
+    @staticmethod
+    def _sql(query):
+        query = query.replace("INSERT OR IGNORE", "INSERT IGNORE")
+        query = query.replace("INSERT OR REPLACE INTO inventory_policies(key,value)", "INSERT INTO inventory_policies(key_name,value)")
+        if "last_insert_rowid()" in query.lower():
+            query = "SELECT LAST_INSERT_ID()"
+        return query.replace("%", "%%").replace("?", "%s")
+
+    def execute(self, query, params=()):
+        cursor = self.raw.cursor()
+        cursor.execute(self._sql(query), params)
+        return MySQLResult(cursor)
+
+    def commit(self):
+        self.raw.commit()
+
+    def rollback(self):
+        self.raw.rollback()
+
+    def close(self):
+        self.raw.close()
+
+    def executescript(self, script):
+        for statement in script.split(";"):
+            if statement.strip():
+                self.execute(statement)
+
 PRODUCT_NAMES = [
     ("Basmati Rice 5kg", "Grocery", 290, 349), ("Toor Dal 1kg", "Grocery", 116, 149), ("Wheat Flour 5kg", "Grocery", 220, 269), ("Sunflower Oil 1L", "Grocery", 112, 139), ("Iodized Salt 1kg", "Grocery", 18, 25),
     ("Green Tea 25 bags", "Beverages", 88, 129), ("Filter Coffee 200g", "Beverages", 142, 189), ("Orange Juice 1L", "Beverages", 76, 109), ("Sparkling Water 750ml", "Beverages", 42, 65), ("Cola 2L", "Beverages", 68, 89),
@@ -46,6 +153,9 @@ def password_hash(password):
 
 
 def connect(path):
+    dsn = os.getenv("DATABASE_URL", "").strip()
+    if dsn.startswith(("mysql://", "mysql+mysqlconnector://", "mysql+pymysql://")):
+        return MySQLConnection(dsn)
     conn = sqlite3.connect(path, timeout=20, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
@@ -53,9 +163,23 @@ def connect(path):
 
 
 def init_db(path):
-    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    dsn = os.getenv("DATABASE_URL", "").strip()
+    is_mysql = dsn.startswith(("mysql://", "mysql+mysqlconnector://", "mysql+pymysql://"))
+    if not is_mysql:
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
     conn = connect(path)
-    conn.executescript(SCHEMA)
+    if is_mysql:
+        for statement in MYSQL_SCHEMA:
+            try:
+                conn.execute(statement)
+            except Exception as exc:
+                if "already exists" not in str(exc).lower() and "duplicate key name" not in str(exc).lower():
+                    conn.rollback()
+                    conn.close()
+                    raise
+        conn.commit()
+    else:
+        conn.executescript(SCHEMA)
     count = conn.execute("SELECT COUNT(*) FROM products").fetchone()[0]
     if count == 0:
         seed(conn)
@@ -67,6 +191,9 @@ def seed(conn):
     today = date.today()
     for role, name, email in [("admin", "Aarav Mehta", "owner@stockpilot.ai"), ("manager", "Maya Shah", "manager@stockpilot.ai"), ("staff", "Rohan Das", "staff@stockpilot.ai")]:
         conn.execute("INSERT INTO users(name,email,password_hash,role) VALUES(?,?,?,?)", (name, email, password_hash("demo123"), role))
+    user_ids = {r["email"]: r["id"] for r in conn.execute("SELECT id,email FROM users")}
+    admin_id = user_ids["owner@stockpilot.ai"]
+    manager_id = user_ids["manager@stockpilot.ai"]
     categories = sorted({row[1] for row in PRODUCT_NAMES})
     for name in categories:
         conn.execute("INSERT INTO categories(name) VALUES(?)", (name,))
@@ -86,7 +213,7 @@ def seed(conn):
         product_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
         expiry = (today + timedelta(days=[9, 18, 35, 60, 120][idx % 5])).isoformat() if expiry_required else None
         conn.execute("INSERT INTO stock_batches(product_id,batch_code,quantity,expiry_date,received_date) VALUES(?,?,?,?,?)", (product_id, f"B-{idx:04d}-A", qty, expiry, (today - timedelta(days=idx % 16)).isoformat()))
-        conn.execute("INSERT INTO stock_movements(product_id,movement_type,quantity,reason,reference,created_at,user_id) VALUES(?,?,?,?,?,?,?)", (product_id, "opening", qty, "Demo opening stock", "SEED", (today - timedelta(days=95)).isoformat(), 1))
+        conn.execute("INSERT INTO stock_movements(product_id,movement_type,quantity,reason,reference,created_at,user_id) VALUES(?,?,?,?,?,?,?)", (product_id, "opening", qty, "Demo opening stock", "SEED", (today - timedelta(days=95)).isoformat(), admin_id))
     product_rows = list(conn.execute("SELECT p.*, c.name category FROM products p JOIN categories c ON c.id=p.category_id"))
     for day_offset in range(90, 0, -3):
         sale_date = today - timedelta(days=day_offset)
@@ -94,10 +221,10 @@ def seed(conn):
             product = product_rows[(day_offset + j * 7) % len(product_rows)]
             quantity = 1 + ((day_offset + j) % 4)
             subtotal = Decimal(str(product["selling_price"])) * quantity
-            cur = conn.execute("INSERT INTO sales(invoice_no,sale_date,subtotal,discount,tax,total,payment_method,status,user_id) VALUES(?,?,?,?,?,?,?,?,?)", (f"INV-{sale_date.strftime('%m%d')}-{j}", sale_date.isoformat(), str(subtotal), "0", str(subtotal * Decimal("0.05")), str(subtotal * Decimal("1.05")), "upi" if j else "card", "completed", 2))
+            cur = conn.execute("INSERT INTO sales(invoice_no,sale_date,subtotal,discount,tax,total,payment_method,status,user_id) VALUES(?,?,?,?,?,?,?,?,?)", (f"INV-{sale_date.strftime('%m%d')}-{j}", sale_date.isoformat(), str(subtotal), "0", str(subtotal * Decimal("0.05")), str(subtotal * Decimal("1.05")), "upi" if j else "card", "completed", manager_id))
             sale_id = cur.lastrowid
             conn.execute("INSERT INTO sale_items(sale_id,product_id,quantity,unit_price,cost_price) VALUES(?,?,?,?,?)", (sale_id, product["id"], quantity, product["selling_price"], product["purchase_cost"]))
-    po_rows = [("PO-2401", 1, "pending", today + timedelta(days=4)), ("PO-2398", 2, "partial", today + timedelta(days=1)), ("PO-2394", 3, "received", today - timedelta(days=6))]
+    po_rows = [("PO-2401", supplier_ids[0], "pending", today + timedelta(days=4)), ("PO-2398", supplier_ids[1], "partial", today + timedelta(days=1)), ("PO-2394", supplier_ids[2], "received", today - timedelta(days=6))]
     for po, supplier, status, expected in po_rows:
         cur = conn.execute("INSERT INTO purchase_orders(po_number,supplier_id,order_date,expected_date,status,total) VALUES(?,?,?,?,?,?)", (po, supplier, (today - timedelta(days=3)).isoformat(), expected.isoformat(), status, "0"))
         po_id = cur.lastrowid
