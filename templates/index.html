@@ -15,11 +15,20 @@
       <p class="eyebrow">SMART INVENTORY CONTROL</p>
       <h1>Clarity before the next purchase.</h1>
       <p class="login-copy">A calm, explainable workspace for stock health, demand signals, and action-ready decisions.</p>
+      <div class="auth-tabs"><button type="button" class="auth-tab active" data-auth-mode="login">Sign in</button><button type="button" class="auth-tab" data-auth-mode="register">Create new admin</button></div>
       <form id="login-form">
         <label>Email<input id="login-email" type="email" value="owner@stockpilot.ai" required></label>
         <label>Password<input id="login-password" type="password" value="demo123" required></label>
         <button class="primary-btn full" type="submit">Enter workspace <span>↗</span></button>
         <div id="login-error" class="form-error"></div>
+      </form>
+      <form id="register-form" class="hidden">
+        <label>Your name<input id="register-name" type="text" placeholder="e.g. Swarup Chowdhury" required></label>
+        <label>Workspace name<input id="register-workspace" type="text" placeholder="e.g. Swarup Grocery" required></label>
+        <label>Email / user ID<input id="register-email" type="email" placeholder="you@example.com" required></label>
+        <label>Password<input id="register-password" type="password" minlength="8" placeholder="At least 8 characters" required></label>
+        <button class="primary-btn full" type="submit">Create private workspace <span>↗</span></button>
+        <div id="register-error" class="form-error"></div>
       </form>
       <div class="demo-hint"><span class="signal-dot"></span><div><strong>Demo workspace</strong><small>Use owner@stockpilot.ai / demo123</small></div></div>
     </section>
@@ -29,7 +38,7 @@
   <div id="app-shell" class="app-shell hidden">
     <aside class="sidebar" id="sidebar">
       <div class="sidebar-top"><div class="brand-lockup"><span class="brand-mark"><i></i><i></i></span><span>STOCKPILOT <b>AI</b></span></div><button class="icon-btn mobile-close" id="close-sidebar">×</button></div>
-      <div class="workspace-switch"><span class="workspace-icon">NP</span><div><strong>Northstar Pantry</strong><small>Demo workspace</small></div><span class="chevron">⌄</span></div>
+      <div class="workspace-switch"><span class="workspace-icon" id="workspace-icon">NP</span><div><strong id="workspace-name">Northstar Pantry</strong><small id="workspace-mode">Demo workspace</small></div><span class="chevron">⌄</span></div>
       <nav class="main-nav">
         <p class="nav-label">COMMAND CENTER</p>
         <button class="nav-item active" data-view="dashboard"><span class="nav-icon">⌂</span>Overview</button>
@@ -50,8 +59,8 @@
     </aside>
 
     <main class="workspace">
-      <header class="topbar"><button class="icon-btn menu-toggle" id="open-sidebar">☰</button><div class="crumb"><span>Northstar Pantry</span><b>/</b><strong id="crumb-title">Overview</strong></div><div class="top-actions"><label class="global-search"><span>⌕</span><input id="global-search" placeholder="Search products, SKUs, orders..." /></label><button class="icon-btn notification-btn" id="notification-btn">♢<span id="notification-count" class="notification-count">0</span></button><button class="avatar top-avatar" id="top-avatar">AM</button></div></header>
-      <div class="demo-ribbon"><span class="signal-dot"></span> DEMO MODE <span class="ribbon-separator"></span> Fictional data for evaluation — every metric is database-backed</div>
+      <header class="topbar"><button class="icon-btn menu-toggle" id="open-sidebar">☰</button><div class="crumb"><span id="workspace-crumb">Northstar Pantry</span><b>/</b><strong id="crumb-title">Overview</strong></div><div class="top-actions"><label class="global-search"><span>⌕</span><input id="global-search" placeholder="Search products, SKUs, orders..." /></label><button class="icon-btn notification-btn" id="notification-btn">♢<span id="notification-count" class="notification-count">0</span></button><button class="avatar top-avatar" id="top-avatar">AM</button></div></header>
+      <div class="demo-ribbon" id="demo-ribbon"><span class="signal-dot"></span> DEMO MODE <span class="ribbon-separator"></span> Fictional data for evaluation — every metric is database-backed</div>
       <div class="content" id="content"></div>
     </main>
   </div>
