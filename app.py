@@ -29,6 +29,13 @@ def close_db(error=None):
     conn = g.pop("db", None)
     if conn: conn.close()
 
+@app.after_request
+def no_cache_api(response):
+    if request.path.startswith("/api/"):
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+    return response
+
 @app.context_processor
 def inject_user():
     return {"current_user": session.get("user")}
