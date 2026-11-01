@@ -6,7 +6,7 @@ from functools import wraps
 from flask import Flask, g, jsonify, render_template, request, session, make_response, send_from_directory
 from config import Config
 from db import init_db, rows, row_dict
-from services import dashboard, product_rows, supplier_records, create_product, process_sale, receive_purchase, record_waste, report, assistant_answer
+from services import dashboard, product_rows, sale_records, supplier_records, create_product, create_purchase_order, process_sale, receive_purchase, record_waste, report, assistant_answer
 
 app = Flask(__name__, template_folder="templates", static_folder="static")
 app.config.from_object(Config)
@@ -131,8 +131,8 @@ def logout():
 @app.get("/api/bootstrap")
 @api_login_required
 def bootstrap():
-    wid = workspace_id(); conn = db(); products = product_rows(conn, wid); notifications = rows(conn, "SELECT * FROM notifications WHERE workspace_id=? ORDER BY is_read, id DESC LIMIT 20", (wid,))
-    return jsonify({"user": session["user"], "csrf_token": session.get("csrf_token"), "workspace": {"id": wid, "name": session["user"].get("workspace_name")}, "dashboard": dashboard(conn, wid, session["user"].get("is_demo", False)), "products": products, "categories": rows(conn, "SELECT * FROM categories WHERE workspace_id=? ORDER BY name", (wid,)), "suppliers": supplier_records(conn, wid), "notifications": notifications, "purchase_orders": rows(conn, "SELECT po.*, s.name supplier FROM purchase_orders po JOIN suppliers s ON s.id=po.supplier_id AND s.workspace_id=? WHERE po.workspace_id=? ORDER BY po.id DESC", (wid, wid)), "algorithms": algorithm_payload()})
+    wid = workspace_id(); conn = db(); products = product_rows(conn, wid); sales = sale_records(conn, wid); suppliers = supplier_records(conn, wid); notifications = rows(conn, "SELECT * FROM notifications WHERE workspace_id=? ORDER BY is_read, id DESC LIMIT 20", (wid,))
+    return jsonify({"user": session["user"], "csrf_token": session.get("csrf_token"), "workspace": {"id": wid, "name": session["user"].get("workspace_name")}, "dashboard": dashboard(conn, wid, session["user"].get("is_demo", False), products, sales, suppliers), "products": products, "sales": sales, "categories": rows(conn, "SELECT * FROM categories WHERE workspace_id=? ORDER BY name", (wid,)), "suppliers": suppliers, "notifications": notifications, "purchase_orders": rows(conn, "SELECT po.*, s.name supplier FROM purchase_orders po JOIN suppliers s ON s.id=po.supplier_id AND s.workspace_id=? WHERE po.workspace_id=? ORDER BY po.id DESC", (wid, wid)), "algorithms": algorithm_payload()})
 
 @app.get("/api/products")
 @api_login_required
@@ -148,6 +148,12 @@ def products():
 @roles("admin", "manager")
 def add_product():
     try: return jsonify({"id": create_product(db(), request.get_json(silent=True) or {}, session["user"]["id"], workspace_id())}), 201
+    except Exception as exc: return jsonify({"error": str(exc)}), 400
+
+@app.post("/api/purchase-orders")
+@roles("admin", "manager")
+def add_purchase_order():
+    try: return jsonify(create_purchase_order(db(), request.get_json(silent=True) or {}, session["user"]["id"], workspace_id())), 201
     except Exception as exc: return jsonify({"error": str(exc)}), 400
 
 @app.post("/api/sales")
@@ -172,12 +178,15 @@ def waste():
 @api_login_required
 @roles("admin", "manager", "staff")
 def mark_read(notification_id):
-    db().execute("UPDATE notifications SET is_read=1 WHERE id=? AND workspace_id=?", (notification_id, workspace_id())); db().commit(); return jsonify({"ok": True})
+    result = db().execute("UPDATE notifications SET is_read=1 WHERE id=? AND workspace_id=?", (notification_id, workspace_id()))
+    if getattr(result, "rowcount", 1) == 0: return jsonify({"error": "Notification not found"}), 404
+    db().commit(); return jsonify({"ok": True})
 
 @app.post("/api/assistant")
 @api_login_required
 def assistant():
-    return jsonify(assistant_answer(db(), (request.get_json(silent=True) or {}).get("question", ""), workspace_id()))
+    try: return jsonify(assistant_answer(db(), (request.get_json(silent=True) or {}).get("question", ""), workspace_id()))
+    except ValueError as exc: return jsonify({"error": str(exc)}), 400
 
 @app.get("/api/reports/<report_type>.csv")
 @api_login_required

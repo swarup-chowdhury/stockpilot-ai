@@ -89,6 +89,10 @@ class MySQLResult:
     def lastrowid(self):
         return self.cursor.lastrowid
 
+    @property
+    def rowcount(self):
+        return self.cursor.rowcount
+
 
 class MySQLConnection:
     def __init__(self, dsn):
@@ -111,6 +115,7 @@ class MySQLConnection:
     @staticmethod
     def _sql(query):
         query = query.replace("INSERT OR IGNORE", "INSERT IGNORE")
+        query = query.replace("INSERT OR REPLACE INTO inventory_policies(key,value,workspace_id)", "INSERT INTO inventory_policies(key_name,value,workspace_id)")
         query = query.replace("INSERT OR REPLACE INTO inventory_policies(key,value)", "INSERT INTO inventory_policies(key_name,value)")
         if "last_insert_rowid()" in query.lower():
             query = "SELECT LAST_INSERT_ID()"
@@ -166,6 +171,7 @@ def connect(path):
 
 TENANT_TABLES = ("users", "categories", "suppliers", "products", "stock_batches", "sales", "sale_items", "stock_movements", "purchase_orders", "purchase_order_items", "notifications", "audit_logs", "inventory_policies")
 _TENANCY_READY = False
+_SCHEMA_READY = False
 
 
 def _has_column(conn, table, column, is_mysql):
@@ -177,7 +183,7 @@ def _has_column(conn, table, column, is_mysql):
 def ensure_tenancy(conn, is_mysql):
     global _TENANCY_READY
     if _TENANCY_READY:
-        return
+        return conn.execute("SELECT id FROM workspaces WHERE slug=?", ("demo",)).fetchone()["id"]
     if is_mysql:
         conn.execute("CREATE TABLE IF NOT EXISTS workspaces (id BIGINT PRIMARY KEY AUTO_INCREMENT, name VARCHAR(180) NOT NULL, slug VARCHAR(120) UNIQUE NOT NULL, is_demo TINYINT DEFAULT 0, created_at VARCHAR(32) DEFAULT NULL)")
         column_type = "BIGINT"
@@ -201,49 +207,55 @@ def ensure_tenancy(conn, is_mysql):
         conn.execute(f"UPDATE {table} SET workspace_id=? WHERE workspace_id IS NULL", (demo_id,))
     conn.commit()
     _TENANCY_READY = True
+    return demo_id
 
 
 def init_db(path):
+    global _SCHEMA_READY
     dsn = os.getenv("DATABASE_URL", "").strip()
     is_mysql = dsn.startswith(("mysql://", "mysql+mysqlconnector://", "mysql+pymysql://"))
     if not is_mysql:
         Path(path).parent.mkdir(parents=True, exist_ok=True)
     conn = connect(path)
-    if is_mysql:
-        for statement in MYSQL_SCHEMA:
-            try:
-                conn.execute(statement)
-            except Exception as exc:
-                if "already exists" not in str(exc).lower() and "duplicate key name" not in str(exc).lower():
-                    conn.rollback()
-                    conn.close()
-                    raise
-        conn.commit()
+    if not _SCHEMA_READY:
+        if is_mysql:
+            for statement in MYSQL_SCHEMA:
+                try:
+                    conn.execute(statement)
+                except Exception as exc:
+                    if "already exists" not in str(exc).lower() and "duplicate key name" not in str(exc).lower():
+                        conn.rollback()
+                        conn.close()
+                        raise
+            conn.commit()
+        else:
+            conn.executescript(SCHEMA)
+        demo_id = ensure_tenancy(conn, is_mysql)
+        _SCHEMA_READY = True
     else:
-        conn.executescript(SCHEMA)
-    ensure_tenancy(conn, is_mysql)
+        demo_id = conn.execute("SELECT id FROM workspaces WHERE slug=?", ("demo",)).fetchone()["id"]
     count = conn.execute("SELECT COUNT(*) FROM products").fetchone()[0]
     if count == 0:
-        seed(conn)
+        seed(conn, demo_id)
     conn.commit()
     return conn
 
 
-def seed(conn):
+def seed(conn, workspace_id):
     today = date.today()
     for role, name, email in [("admin", "Aarav Mehta", "owner@stockpilot.ai"), ("manager", "Maya Shah", "manager@stockpilot.ai"), ("staff", "Rohan Das", "staff@stockpilot.ai")]:
-        conn.execute("INSERT INTO users(name,email,password_hash,role) VALUES(?,?,?,?)", (name, email, password_hash("demo123"), role))
-    user_ids = {r["email"]: r["id"] for r in conn.execute("SELECT id,email FROM users")}
+        conn.execute("INSERT INTO users(name,email,password_hash,role,workspace_id) VALUES(?,?,?,?,?)", (name, email, password_hash("demo123"), role, workspace_id))
+    user_ids = {r["email"]: r["id"] for r in conn.execute("SELECT id,email FROM users WHERE workspace_id=?", (workspace_id,))}
     admin_id = user_ids["owner@stockpilot.ai"]
     manager_id = user_ids["manager@stockpilot.ai"]
     categories = sorted({row[1] for row in PRODUCT_NAMES})
     for name in categories:
-        conn.execute("INSERT INTO categories(name) VALUES(?)", (name,))
+        conn.execute("INSERT INTO categories(name,workspace_id) VALUES(?,?)", (name, workspace_id))
     suppliers = [("Northstar Wholesale", "+91 80 4400 2211", "orders@northstar.example", 3, .94), ("FreshRoute Foods", "+91 80 4400 3344", "dispatch@freshroute.example", 2, .89), ("BlueCart Traders", "+91 80 4400 5588", "hello@bluecart.example", 6, .78), ("Evergreen Essentials", "+91 80 4400 6677", "supply@evergreen.example", 5, .84)]
     for row in suppliers:
-        conn.execute("INSERT INTO suppliers(name,contact,email,lead_time_days,reliability) VALUES(?,?,?,?,?)", row)
-    cat_ids = {r["name"]: r["id"] for r in conn.execute("SELECT * FROM categories")}
-    supplier_ids = [r["id"] for r in conn.execute("SELECT * FROM suppliers")]
+        conn.execute("INSERT INTO suppliers(name,contact,email,lead_time_days,reliability,workspace_id) VALUES(?,?,?,?,?,?)", (*row, workspace_id))
+    cat_ids = {r["name"]: r["id"] for r in conn.execute("SELECT * FROM categories WHERE workspace_id=?", (workspace_id,))}
+    supplier_ids = [r["id"] for r in conn.execute("SELECT * FROM suppliers WHERE workspace_id=?", (workspace_id,))]
     random.seed(42)
     for idx, (name, category, cost, price) in enumerate(PRODUCT_NAMES, 1):
         qty = [7, 18, 46, 72, 4, 31, 55, 12][idx % 8]
@@ -251,36 +263,36 @@ def seed(conn):
         reorder = minimum + 10
         supplier_id = supplier_ids[idx % len(supplier_ids)]
         expiry_required = 1 if category in ("Fresh Produce", "Chilled", "Beverages", "Breakfast") else 0
-        conn.execute("INSERT INTO products(sku,barcode,name,description,category_id,supplier_id,purchase_cost,selling_price,current_qty,minimum_stock,reorder_level,unit,expiry_required) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)", (f"SP-{idx:04d}", f"890100{idx:06d}", name, f"Fictional demo SKU for {name.lower()}.", cat_ids[category], supplier_id, cost, price, qty, minimum, reorder, "pack" if "pack" in name.lower() else "unit", expiry_required))
+        conn.execute("INSERT INTO products(sku,barcode,name,description,category_id,supplier_id,purchase_cost,selling_price,current_qty,minimum_stock,reorder_level,unit,expiry_required,workspace_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (f"SP-{idx:04d}", f"890100{idx:06d}", name, f"Fictional demo SKU for {name.lower()}.", cat_ids[category], supplier_id, cost, price, qty, minimum, reorder, "pack" if "pack" in name.lower() else "unit", expiry_required, workspace_id))
         product_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
         expiry = (today + timedelta(days=[9, 18, 35, 60, 120][idx % 5])).isoformat() if expiry_required else None
-        conn.execute("INSERT INTO stock_batches(product_id,batch_code,quantity,expiry_date,received_date) VALUES(?,?,?,?,?)", (product_id, f"B-{idx:04d}-A", qty, expiry, (today - timedelta(days=idx % 16)).isoformat()))
-        conn.execute("INSERT INTO stock_movements(product_id,movement_type,quantity,reason,reference,created_at,user_id) VALUES(?,?,?,?,?,?,?)", (product_id, "opening", qty, "Demo opening stock", "SEED", (today - timedelta(days=95)).isoformat(), admin_id))
-    product_rows = list(conn.execute("SELECT p.*, c.name category FROM products p JOIN categories c ON c.id=p.category_id"))
+        conn.execute("INSERT INTO stock_batches(product_id,batch_code,quantity,expiry_date,received_date,workspace_id) VALUES(?,?,?,?,?,?)", (product_id, f"B-{idx:04d}-A", qty, expiry, (today - timedelta(days=idx % 16)).isoformat(), workspace_id))
+        conn.execute("INSERT INTO stock_movements(product_id,movement_type,quantity,reason,reference,created_at,user_id,workspace_id) VALUES(?,?,?,?,?,?,?,?)", (product_id, "opening", qty, "Demo opening stock", "SEED", (today - timedelta(days=95)).isoformat(), admin_id, workspace_id))
+    product_rows = list(conn.execute("SELECT p.*, c.name category FROM products p JOIN categories c ON c.id=p.category_id AND c.workspace_id=? WHERE p.workspace_id=?", (workspace_id, workspace_id)))
     for day_offset in range(90, 0, -3):
         sale_date = today - timedelta(days=day_offset)
         for j in range(2):
             product = product_rows[(day_offset + j * 7) % len(product_rows)]
             quantity = 1 + ((day_offset + j) % 4)
             subtotal = Decimal(str(product["selling_price"])) * quantity
-            cur = conn.execute("INSERT INTO sales(invoice_no,sale_date,subtotal,discount,tax,total,payment_method,status,user_id) VALUES(?,?,?,?,?,?,?,?,?)", (f"INV-{sale_date.strftime('%m%d')}-{j}", sale_date.isoformat(), str(subtotal), "0", str(subtotal * Decimal("0.05")), str(subtotal * Decimal("1.05")), "upi" if j else "card", "completed", manager_id))
+            cur = conn.execute("INSERT INTO sales(invoice_no,sale_date,subtotal,discount,tax,total,payment_method,status,user_id,workspace_id) VALUES(?,?,?,?,?,?,?,?,?,?)", (f"INV-{sale_date.strftime('%m%d')}-{j}", sale_date.isoformat(), str(subtotal), "0", str(subtotal * Decimal("0.05")), str(subtotal * Decimal("1.05")), "upi" if j else "card", "completed", manager_id, workspace_id))
             sale_id = cur.lastrowid
-            conn.execute("INSERT INTO sale_items(sale_id,product_id,quantity,unit_price,cost_price) VALUES(?,?,?,?,?)", (sale_id, product["id"], quantity, product["selling_price"], product["purchase_cost"]))
+            conn.execute("INSERT INTO sale_items(sale_id,product_id,quantity,unit_price,cost_price,workspace_id) VALUES(?,?,?,?,?,?)", (sale_id, product["id"], quantity, product["selling_price"], product["purchase_cost"], workspace_id))
     po_rows = [("PO-2401", supplier_ids[0], "pending", today + timedelta(days=4)), ("PO-2398", supplier_ids[1], "partial", today + timedelta(days=1)), ("PO-2394", supplier_ids[2], "received", today - timedelta(days=6))]
     for po, supplier, status, expected in po_rows:
-        cur = conn.execute("INSERT INTO purchase_orders(po_number,supplier_id,order_date,expected_date,status,total) VALUES(?,?,?,?,?,?)", (po, supplier, (today - timedelta(days=3)).isoformat(), expected.isoformat(), status, "0"))
+        cur = conn.execute("INSERT INTO purchase_orders(po_number,supplier_id,order_date,expected_date,status,total,workspace_id) VALUES(?,?,?,?,?,?,?)", (po, supplier, (today - timedelta(days=3)).isoformat(), expected.isoformat(), status, "0", workspace_id))
         po_id = cur.lastrowid
         for product in product_rows[:2]:
             ordered = 24
             received = 8 if status == "partial" else (24 if status == "received" else 0)
-            conn.execute("INSERT INTO purchase_order_items(po_id,product_id,ordered_qty,received_qty,unit_cost) VALUES(?,?,?,?,?)", (po_id, product["id"], ordered, received, product["purchase_cost"]))
-    expiring = conn.execute("SELECT id,name,current_qty FROM products WHERE expiry_required=1 AND current_qty>0 AND id%5=1 LIMIT 3").fetchall()
+            conn.execute("INSERT INTO purchase_order_items(po_id,product_id,ordered_qty,received_qty,unit_cost,workspace_id) VALUES(?,?,?,?,?,?)", (po_id, product["id"], ordered, received, product["purchase_cost"], workspace_id))
+    expiring = conn.execute("SELECT id,name,current_qty FROM products WHERE expiry_required=1 AND current_qty>0 AND id%5=1 AND workspace_id=? LIMIT 3", (workspace_id,)).fetchall()
     for product in expiring:
-        conn.execute("INSERT INTO notifications(kind,title,message,severity,entity_type,entity_id,created_at) VALUES(?,?,?,?,?,?,?)", ("expiry", "Expiry window approaching", f"{product['name']} has a batch expiring soon.", "warning", "product", product["id"], today.isoformat()))
-    for product in conn.execute("SELECT id,name,current_qty,minimum_stock FROM products WHERE current_qty<=minimum_stock LIMIT 4"):
-        conn.execute("INSERT INTO notifications(kind,title,message,severity,entity_type,entity_id,created_at) VALUES(?,?,?,?,?,?,?)", ("low_stock", "Critical stock level", f"{product['name']} is at {product['current_qty']} units; reorder level is {product['minimum_stock']}.", "critical", "product", product["id"], today.isoformat()))
-    conn.execute("INSERT OR REPLACE INTO inventory_policies(key,value) VALUES('safety_stock_days','2')")
-    conn.execute("INSERT OR REPLACE INTO inventory_policies(key,value) VALUES('target_days','14')")
+        conn.execute("INSERT INTO notifications(kind,title,message,severity,entity_type,entity_id,created_at,workspace_id) VALUES(?,?,?,?,?,?,?,?)", ("expiry", "Expiry window approaching", f"{product['name']} has a batch expiring soon.", "warning", "product", product["id"], today.isoformat(), workspace_id))
+    for product in conn.execute("SELECT id,name,current_qty,minimum_stock FROM products WHERE current_qty<=minimum_stock AND workspace_id=? LIMIT 4", (workspace_id,)):
+        conn.execute("INSERT INTO notifications(kind,title,message,severity,entity_type,entity_id,created_at,workspace_id) VALUES(?,?,?,?,?,?,?,?)", ("low_stock", "Critical stock level", f"{product['name']} is at {product['current_qty']} units; reorder level is {product['minimum_stock']}.", "critical", "product", product["id"], today.isoformat(), workspace_id))
+    conn.execute("INSERT OR REPLACE INTO inventory_policies(key,value,workspace_id) VALUES('safety_stock_days','2',?)", (workspace_id,))
+    conn.execute("INSERT OR REPLACE INTO inventory_policies(key,value,workspace_id) VALUES('target_days','14',?)", (workspace_id,))
 
 def row_dict(row):
     return dict(row) if row else None

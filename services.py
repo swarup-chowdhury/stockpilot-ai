@@ -16,22 +16,36 @@ def product_rows(conn, workspace_id):
 
 def sale_records(conn, workspace_id):
     sales = rows(conn, "SELECT * FROM sales WHERE workspace_id=? ORDER BY sale_date DESC", (workspace_id,))
+    if not sales:
+        return sales
+    sale_ids = ",".join("?" for _ in sales)
+    items = rows(conn, f"SELECT * FROM sale_items WHERE workspace_id=? AND sale_id IN ({sale_ids})", (workspace_id, *[sale["id"] for sale in sales]))
+    by_sale = defaultdict(list)
+    for item in items:
+        by_sale[item["sale_id"]].append(item)
     for sale in sales:
-        sale["items"] = rows(conn, "SELECT * FROM sale_items WHERE sale_id=? AND workspace_id=?", (sale["id"], workspace_id))
+        sale["items"] = by_sale.get(sale["id"], [])
     return sales
 
 
 def supplier_records(conn, workspace_id):
     suppliers = rows(conn, "SELECT * FROM suppliers WHERE workspace_id=? ORDER BY name", (workspace_id,))
+    if not suppliers:
+        return suppliers
+    supplier_ids = ",".join("?" for _ in suppliers)
+    links = rows(conn, f"SELECT id,supplier_id FROM products WHERE workspace_id=? AND supplier_id IN ({supplier_ids})", (workspace_id, *[supplier["id"] for supplier in suppliers]))
+    by_supplier = defaultdict(list)
+    for product in links:
+        by_supplier[product["supplier_id"]].append(product["id"])
     for supplier in suppliers:
-        supplier["product_ids"] = [r["id"] for r in conn.execute("SELECT id FROM products WHERE supplier_id=? AND workspace_id=?", (supplier["id"], workspace_id)).fetchall()]
+        supplier["product_ids"] = by_supplier.get(supplier["id"], [])
     return suppliers
 
 
-def dashboard(conn, workspace_id, demo_mode=False):
-    products = product_rows(conn, workspace_id)
-    sales = sale_records(conn, workspace_id)
-    suppliers = supplier_records(conn, workspace_id)
+def dashboard(conn, workspace_id, demo_mode=False, products=None, sales=None, suppliers=None):
+    products = products if products is not None else product_rows(conn, workspace_id)
+    sales = sales if sales is not None else sale_records(conn, workspace_id)
+    suppliers = suppliers if suppliers is not None else supplier_records(conn, workspace_id)
     batches = rows(conn, "SELECT * FROM stock_batches WHERE workspace_id=?", (workspace_id,))
     today = date.today().isoformat()
     inventory_value = sum((Decimal(str(p["purchase_cost"])) * p["current_qty"] for p in products), Decimal("0"))
@@ -41,10 +55,14 @@ def dashboard(conn, workspace_id, demo_mode=False):
     low = [p for p in products if p["current_qty"] <= p["reorder_level"]]
     product_names = {p["id"]: p["name"] for p in products}
     expiring = [{**b, "name": product_names.get(b["product_id"], "Unknown product")} for b in batches if b.get("expiry_date") and b["expiry_date"] <= (date.today() + timedelta(days=30)).isoformat() and b["quantity"] > 0]
+    expired = [b for b in batches if b.get("expiry_date") and b["expiry_date"] < today and b["quantity"] > 0]
+    month_start = date.today().replace(day=1).isoformat()
+    waste_rows = rows(conn, "SELECT quantity FROM stock_movements WHERE workspace_id=? AND movement_type='waste' AND created_at>=?", (workspace_id, month_start))
+    waste_units = sum(abs(int(r["quantity"])) for r in waste_rows)
     purchase_pending = rows(conn, "SELECT po.*, s.name supplier FROM purchase_orders po JOIN suppliers s ON s.id=po.supplier_id AND s.workspace_id=? WHERE po.status IN ('pending','partial') AND po.workspace_id=? ORDER BY expected_date", (workspace_id, workspace_id))
     recommendations = restock_recommendations(products, sales, suppliers, batches)
     movements = rows(conn, "SELECT m.*, p.name product, p.sku FROM stock_movements m JOIN products p ON p.id=m.product_id AND p.workspace_id=? WHERE m.workspace_id=? ORDER BY m.id DESC LIMIT 8", (workspace_id, workspace_id))
-    return {"metrics": {"active_products": len(products), "inventory_value": float(money(inventory_value)), "selling_value": float(money(selling_value)), "low_stock": len(low), "expiring": len(expiring), "today_sales": float(money(today_sales)), "gross_profit": float(money(profit)), "pending_pos": len(purchase_pending)}, "low_stock": low[:6], "expiring": expiring[:6], "pending_pos": purchase_pending[:5], "recommendations": recommendations[:6], "movements": movements, "sales_trend": daily_sales(sales, 14), "category_mix": category_mix(products), "top_products": top_products(products, sales), "demo_mode": bool(demo_mode), "is_empty": not products and not sales}
+    return {"metrics": {"active_products": len(products), "inventory_value": float(money(inventory_value)), "selling_value": float(money(selling_value)), "low_stock": len(low), "expiring": len(expiring), "expired_stock": len(expired), "waste_units": waste_units, "today_sales": float(money(today_sales)), "gross_profit": float(money(profit)), "pending_pos": len(purchase_pending)}, "low_stock": low[:6], "expiring": expiring[:6], "pending_pos": purchase_pending[:5], "recommendations": recommendations[:6], "movements": movements, "sales_trend": daily_sales(sales, 14), "category_mix": category_mix(products), "top_products": top_products(products, sales), "demo_mode": bool(demo_mode), "is_empty": not products and not sales}
 
 
 def _ensure_product_refs(conn, workspace_id, category_id, supplier_id):
@@ -53,13 +71,13 @@ def _ensure_product_refs(conn, workspace_id, category_id, supplier_id):
         if row:
             category_id = row["id"]
         else:
-            category_id = conn.execute("INSERT INTO categories(name,workspace_id) VALUES(?,?)", ("General", workspace_id)).lastrowid
+            category_id = conn.execute("INSERT INTO categories(name,workspace_id) VALUES(?,?)", (f"General · {workspace_id}", workspace_id)).lastrowid
     if not supplier_id:
         row = conn.execute("SELECT id FROM suppliers WHERE workspace_id=? ORDER BY id LIMIT 1", (workspace_id,)).fetchone()
         if row:
             supplier_id = row["id"]
         else:
-            supplier_id = conn.execute("INSERT INTO suppliers(name,contact,email,workspace_id) VALUES(?,?,?,?)", ("Add supplier", "", "", workspace_id)).lastrowid
+            supplier_id = conn.execute("INSERT INTO suppliers(name,contact,email,workspace_id) VALUES(?,?,?,?)", (f"Add supplier · {workspace_id}", "", "", workspace_id)).lastrowid
     return int(category_id), int(supplier_id)
 
 
@@ -88,15 +106,54 @@ def create_product(conn, payload, user_id, workspace_id):
         raise
 
 
+def create_purchase_order(conn, payload, user_id, workspace_id):
+    try:
+        supplier_id = int(payload.get("supplier_id") or 0)
+        items = payload.get("items") or []
+        supplier = conn.execute("SELECT * FROM suppliers WHERE id=? AND workspace_id=?", (supplier_id, workspace_id)).fetchone()
+        if not supplier or not items:
+            raise ValueError("Choose a supplier and add at least one product")
+        normalized = []
+        total = Decimal("0")
+        for item in items:
+            product_id = int(item.get("product_id") or 0)
+            quantity = int(item.get("quantity") or 0)
+            product = conn.execute("SELECT * FROM products WHERE id=? AND workspace_id=? AND active=1", (product_id, workspace_id)).fetchone()
+            if not product or quantity <= 0:
+                raise ValueError("Purchase order lines must contain valid products and positive quantities")
+            unit_cost = Decimal(str(item.get("unit_cost") or product["purchase_cost"]))
+            if unit_cost < 0:
+                raise ValueError("Unit cost cannot be negative")
+            normalized.append((product, quantity, unit_cost))
+            total += unit_cost * quantity
+        order_number = (payload.get("po_number") or "").strip()
+        if not order_number:
+            count = conn.execute("SELECT COUNT(*) FROM purchase_orders WHERE workspace_id=?", (workspace_id,)).fetchone()[0]
+            order_number = f"PO-{date.today().strftime('%y%m%d')}-{count + 1:03d}"
+        expected = (payload.get("expected_date") or "").strip() or None
+        cur = conn.execute("INSERT INTO purchase_orders(po_number,supplier_id,order_date,expected_date,status,total,workspace_id) VALUES(?,?,?,?,?,?,?)", (order_number, supplier_id, date.today().isoformat(), expected, "pending", str(total), workspace_id))
+        po_id = cur.lastrowid
+        for product, quantity, unit_cost in normalized:
+            conn.execute("INSERT INTO purchase_order_items(po_id,product_id,ordered_qty,received_qty,unit_cost,workspace_id) VALUES(?,?,?,?,?,?)", (po_id, product["id"], quantity, 0, str(unit_cost), workspace_id))
+        conn.execute("INSERT INTO audit_logs(action,entity,entity_id,detail,created_at,user_id,workspace_id) VALUES(?,?,?,?,?,?,?)", ("create", "purchase_order", po_id, order_number, date.today().isoformat(), user_id, workspace_id))
+        conn.commit()
+        return {"id": po_id, "po_number": order_number, "total": float(total)}
+    except Exception:
+        conn.rollback()
+        raise
+
+
 def process_sale(conn, payload, user_id, workspace_id):
     items = payload.get("items", [])
     if not items: raise ValueError("Add at least one product to the sale")
     try:
         subtotal = Decimal("0")
         enriched = []
+        quantities = defaultdict(int)
         for item in items:
-            product = conn.execute("SELECT * FROM products WHERE id=? AND workspace_id=? AND active=1", (int(item["product_id"]), workspace_id)).fetchone()
-            quantity = int(item["quantity"])
+            quantities[int(item["product_id"])] += int(item["quantity"])
+        for product_id, quantity in quantities.items():
+            product = conn.execute("SELECT * FROM products WHERE id=? AND workspace_id=? AND active=1", (product_id, workspace_id)).fetchone()
             if not product or quantity <= 0: raise ValueError("Invalid sale line")
             if product["current_qty"] < quantity: raise ValueError(f"Insufficient stock for {product['name']}")
             line = Decimal(str(product["selling_price"])) * quantity
@@ -104,10 +161,14 @@ def process_sale(conn, payload, user_id, workspace_id):
             enriched.append((product, quantity, line))
         discount = Decimal(str(payload.get("discount", 0) or 0))
         tax_rate = Decimal(str(payload.get("tax_rate", "5") or "0")) / 100
+        payment_method = (payload.get("payment_method") or "card").strip().lower()
+        if discount < 0 or discount > subtotal: raise ValueError("Discount must be between zero and the sale subtotal")
+        if tax_rate < 0 or tax_rate > 1: raise ValueError("Tax rate must be between 0 and 100 percent")
+        if payment_method not in {"card", "upi", "cash"}: raise ValueError("Choose card, UPI, or cash as the payment method")
         tax = (subtotal - discount) * tax_rate
         total = (subtotal - discount + tax).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
         invoice = f"INV-{date.today().strftime('%y%m%d')}-{conn.execute('SELECT COUNT(*) FROM sales WHERE workspace_id=?', (workspace_id,)).fetchone()[0] + 1:04d}"
-        cur = conn.execute("INSERT INTO sales(invoice_no,sale_date,subtotal,discount,tax,total,payment_method,status,user_id,workspace_id) VALUES(?,?,?,?,?,?,?,?,?,?)", (invoice, date.today().isoformat(), str(subtotal), str(discount), str(tax), str(total), payload.get("payment_method", "card"), "completed", user_id, workspace_id))
+        cur = conn.execute("INSERT INTO sales(invoice_no,sale_date,subtotal,discount,tax,total,payment_method,status,user_id,workspace_id) VALUES(?,?,?,?,?,?,?,?,?,?)", (invoice, date.today().isoformat(), str(subtotal), str(discount), str(tax), str(total), payment_method, "completed", user_id, workspace_id))
         sale_id = cur.lastrowid
         for product, quantity, line in enriched:
             conn.execute("INSERT INTO sale_items(sale_id,product_id,quantity,unit_price,cost_price,workspace_id) VALUES(?,?,?,?,?,?)", (sale_id, product["id"], quantity, product["selling_price"], product["purchase_cost"], workspace_id))
@@ -142,7 +203,8 @@ def receive_purchase(conn, po_id, user_id, workspace_id):
             conn.execute("UPDATE purchase_order_items SET received_qty=ordered_qty WHERE id=? AND workspace_id=?", (item["id"], workspace_id))
             conn.execute("INSERT INTO stock_movements(product_id,movement_type,quantity,reason,reference,created_at,user_id,workspace_id) VALUES(?,?,?,?,?,?,?,?)", (item["product_id"], "receipt", receive_qty, "Purchase receipt", po["po_number"], date.today().isoformat(), user_id, workspace_id))
             total_received += receive_qty
-        conn.execute("UPDATE purchase_orders SET status='received' WHERE id=? AND workspace_id=?", (po_id, workspace_id))
+        remaining = conn.execute("SELECT COUNT(*) FROM purchase_order_items WHERE po_id=? AND workspace_id=? AND received_qty<ordered_qty", (po_id, workspace_id)).fetchone()[0]
+        conn.execute("UPDATE purchase_orders SET status=? WHERE id=? AND workspace_id=?", ("partial" if remaining else "received", po_id, workspace_id))
         conn.commit(); return total_received
     except Exception:
         conn.rollback(); raise
@@ -179,7 +241,9 @@ def report(conn, report_type, workspace_id):
 
 
 def assistant_answer(conn, question, workspace_id):
-    q = question.lower().strip(); products = product_rows(conn, workspace_id); sales = sale_records(conn, workspace_id)
+    if not isinstance(question, str) or not question.strip():
+        raise ValueError("Ask a supported inventory question")
+    q = question[:300].lower().strip(); products = product_rows(conn, workspace_id); sales = sale_records(conn, workspace_id)
     if any(word in q for word in ("restock", "reorder", "replenish")):
         recs = restock_recommendations(products, sales, supplier_records(conn, workspace_id), rows(conn, "SELECT * FROM stock_batches WHERE workspace_id=?", (workspace_id,)))
         return {"title": "Restocking priorities", "answer": f"I found {len(recs)} products that need attention. The top signal is {recs[0]['product']} at {recs[0]['current_stock']} units." if recs else "No products are currently below the calculated target.", "items": recs[:5]}
@@ -188,7 +252,8 @@ def assistant_answer(conn, question, workspace_id):
     if "valuation" in q or "inventory value" in q:
         value = sum((Decimal(str(p["purchase_cost"])) * p["current_qty"] for p in products), Decimal("0")); return {"title": "Current inventory valuation", "answer": f"Recorded inventory at purchase cost is ₹{money(value):,.2f} across {len(products)} active products.", "items": []}
     if "expire" in q:
-        soon = rows(conn, "SELECT p.name,b.expiry_date,b.quantity FROM stock_batches b JOIN products p ON p.id=b.product_id AND p.workspace_id=? WHERE b.workspace_id=? AND b.expiry_date IS NOT NULL AND b.quantity>0 ORDER BY b.expiry_date LIMIT 6", (workspace_id, workspace_id)); return {"title": "Expiry watch", "answer": "These batches are the next expiry signals in the ledger.", "items": soon}
+        cutoff = (date.today() + timedelta(days=30)).isoformat()
+        soon = rows(conn, "SELECT p.name,b.expiry_date,b.quantity FROM stock_batches b JOIN products p ON p.id=b.product_id AND p.workspace_id=? WHERE b.workspace_id=? AND b.expiry_date IS NOT NULL AND b.expiry_date<=? AND b.quantity>0 ORDER BY b.expiry_date LIMIT 6", (workspace_id, workspace_id, cutoff)); return {"title": "Expiry watch", "answer": "These batches expire within the next 30 days in this workspace.", "items": soon}
     if "supplier" in q or "delivery" in q:
         items = [{"supplier": s["name"], "reliability": f"{s['reliability']*100:.0f}%", "lead_time_days": s["lead_time_days"]} for s in sorted(supplier_records(conn, workspace_id), key=lambda x: x["reliability"], reverse=True)]; return {"title": "Supplier performance", "answer": "Supplier scores use recorded lead time and reliability fields in this workspace.", "items": items}
     return {"title": "Try a supported question", "answer": "I can answer about restocking, fastest sellers, expiring products, inventory valuation, or supplier delivery performance.", "items": []}
