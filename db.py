@@ -4,6 +4,7 @@ import os
 import random
 import sqlite3
 import ssl
+import threading
 from datetime import date, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -111,6 +112,7 @@ class MySQLConnection:
             cursorclass=pymysql.cursors.DictCursor,
             ssl=ssl_context,
         )
+        self._in_pool = False
 
     @staticmethod
     def _sql(query):
@@ -133,6 +135,20 @@ class MySQLConnection:
         self.raw.rollback()
 
     def close(self):
+        # Flask tears down request-scoped `g` after every request. Return the
+        # managed connection to a small process-local pool instead of
+        # reconnecting over TLS for every API call.
+        if self._in_pool:
+            return None
+        self._in_pool = True
+        with _MYSQL_POOL_LOCK:
+            if len(_MYSQL_POOL) < _MYSQL_POOL_SIZE:
+                _MYSQL_POOL.append(self)
+                return None
+        self.raw.close()
+
+    def dispose(self):
+        self._in_pool = True
         self.raw.close()
 
     def executescript(self, script):
@@ -172,6 +188,26 @@ def connect(path):
 TENANT_TABLES = ("users", "categories", "suppliers", "products", "stock_batches", "sales", "sale_items", "stock_movements", "purchase_orders", "purchase_order_items", "notifications", "audit_logs", "inventory_policies")
 _TENANCY_READY = False
 _SCHEMA_READY = False
+_INIT_LOCK = threading.Lock()
+_MYSQL_POOL_LOCK = threading.Lock()
+_MYSQL_POOL = []
+_MYSQL_POOL_SIZE = max(2, int(os.getenv("MYSQL_POOL_SIZE", "4")))
+
+
+def mysql_connection(dsn):
+    with _MYSQL_POOL_LOCK:
+        conn = _MYSQL_POOL.pop() if _MYSQL_POOL else None
+    if conn is not None:
+        try:
+            conn.raw.ping(reconnect=True)
+            conn._in_pool = False
+            return conn
+        except Exception:
+            try:
+                conn.dispose()
+            except Exception:
+                pass
+    return MySQLConnection(dsn)
 
 
 def _has_column(conn, table, column, is_mysql):
@@ -216,28 +252,27 @@ def init_db(path):
     is_mysql = dsn.startswith(("mysql://", "mysql+mysqlconnector://", "mysql+pymysql://"))
     if not is_mysql:
         Path(path).parent.mkdir(parents=True, exist_ok=True)
-    conn = connect(path)
-    if not _SCHEMA_READY:
-        if is_mysql:
-            for statement in MYSQL_SCHEMA:
-                try:
-                    conn.execute(statement)
-                except Exception as exc:
-                    if "already exists" not in str(exc).lower() and "duplicate key name" not in str(exc).lower():
-                        conn.rollback()
-                        conn.close()
-                        raise
+    conn = mysql_connection(dsn) if is_mysql else connect(path)
+    with _INIT_LOCK:
+        if not _SCHEMA_READY:
+            if is_mysql:
+                for statement in MYSQL_SCHEMA:
+                    try:
+                        conn.execute(statement)
+                    except Exception as exc:
+                        if "already exists" not in str(exc).lower() and "duplicate key name" not in str(exc).lower():
+                            conn.rollback()
+                            getattr(conn, "dispose", conn.close)()
+                            raise
+                conn.commit()
+            else:
+                conn.executescript(SCHEMA)
+            demo_id = ensure_tenancy(conn, is_mysql)
+            count = conn.execute("SELECT COUNT(*) FROM products").fetchone()[0]
+            if count == 0:
+                seed(conn, demo_id)
             conn.commit()
-        else:
-            conn.executescript(SCHEMA)
-        demo_id = ensure_tenancy(conn, is_mysql)
-        _SCHEMA_READY = True
-    else:
-        demo_id = conn.execute("SELECT id FROM workspaces WHERE slug=?", ("demo",)).fetchone()["id"]
-    count = conn.execute("SELECT COUNT(*) FROM products").fetchone()[0]
-    if count == 0:
-        seed(conn, demo_id)
-    conn.commit()
+            _SCHEMA_READY = True
     return conn
 
 

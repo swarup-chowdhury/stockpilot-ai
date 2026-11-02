@@ -21,7 +21,7 @@ def db():
 
 @app.before_request
 def attach_db():
-    if request.path.startswith("/api") or request.path == "/healthz":
+    if request.path.startswith("/api"):
         db()
 
 @app.teardown_appcontext
@@ -214,4 +214,7 @@ def algorithm_payload():
     ]
 
 if __name__ == "__main__":
+    # Prepare the managed schema before accepting traffic. Without this
+    # warm-up, the first login paid the full TLS/schema/tenancy setup cost.
+    init_db(app.config["DATABASE_PATH"]).close()
     port = int(os.getenv("PORT", "3000")); app.run(host="0.0.0.0", port=port, debug=False)
