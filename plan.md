@@ -21,7 +21,7 @@ stockpilot/
 ├── .gitignore
 ├── templates/index.html      # application shell and login view
 ├── static/app.js             # client routing, forms, tables, charts and toasts
-├── static/styles.css         # responsive design system; no watermark or platform branding
+├── static/styles.css         # responsive design system; no watermark or third-party branding
 ├── public/manus-routes.json  # route manifest for Preview
 ├── oracle/schema.sql         # normalized Oracle tables, constraints, indexes and sequences
 ├── oracle/inventory_pkg.sql  # INVENTORY_PKG specification and body

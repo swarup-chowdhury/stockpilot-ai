@@ -2,9 +2,9 @@
 
 ## Smart Inventory & Demand Intelligence System
 
-StockPilot AI is a full-stack inventory management and demand-intelligence application built with Python and Flask. It is designed for grocery shops, supermarkets, retail stores, wholesalers, and small businesses that need a reliable way to manage products, suppliers, sales, purchase orders, stock batches, expiry dates, reports, and intelligent restocking decisions.
+StockPilot AI is my full-stack inventory management and demand-intelligence project, built with Python and Flask. I designed it for grocery shops, supermarkets, retail stores, wholesalers, and small businesses that need a practical way to manage products, suppliers, sales, purchase orders, stock batches, expiry dates, reports, and restocking decisions.
 
-The project is implemented as a working business application rather than a static dashboard. Sales reduce inventory, purchase receipts increase inventory, waste uses FEFO batch selection, reports are generated from stored records, and all stock-affecting operations create an auditable movement history.
+I built the application around real business workflows instead of a static dashboard. A sale reduces inventory, receiving a purchase increases inventory, waste uses FEFO batch selection, reports come from stored records, and every stock-affecting operation is recorded in an auditable movement history.
 
 > **Academic project:** Python Programming — MCA (AI/ML), Chandigarh University  
 > **Student:** Swarup Chowdhury  
@@ -285,7 +285,7 @@ stockpilot/
 ├── Dockerfile                     # Production container configuration
 ├── .env.example                   # Safe environment template
 ├── public/
-│   └── manus-routes.json          # Managed route manifest
+│   └── manus-routes.json          # Application route manifest
 ├── templates/
 │   └── index.html                 # Application shell and authentication forms
 ├── static/
@@ -540,7 +540,7 @@ The Flask API includes protected endpoints for:
 | Endpoint | Purpose |
 |---|---|
 | `GET /healthz` | Unauthenticated health check |
-| `GET /manus-routes.json` | User-facing route manifest |
+| `GET /manus-routes.json` | Application route manifest |
 | `POST /api/login` | Authenticate a user |
 | `POST /api/logout` | End the current session |
 | `POST /api/register-admin` | Create a new admin workspace |
